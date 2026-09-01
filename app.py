@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import requests
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -12,7 +12,7 @@ app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8879920230:AAHXPrHiOfEBuXwaFH3L5OCK0yMLq2UgApE")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "YOUR_SECRET_KEY")
-OWNER_CONTACT = "@Almamud09"  # এখানে তোমার টেলিগ্রাম ইউজারনেম বা কন্টাক্ট আইডি দিয়ে দিও
+OWNER_CONTACT = "@Almamud09"
 
 DATABASE = "forexsquad.db"
 
@@ -333,11 +333,8 @@ def telegram_webhook():
             query = update["callback_query"]
             telegram_id = query["from"]["id"]
             data = query["data"]
-            username = query["from"].get("username", "")
 
             if data == "trial":
-                # Calculate 15 days trial end date
-                from datetime import timedelta
                 trial_end = (date.today() + timedelta(days=15)).strftime("%Y-%m-%d")
 
                 conn = get_db()
@@ -352,15 +349,15 @@ def telegram_webhook():
                     telegram_id,
                     "🎉 *15 Days Free Trial Activated!*\n\n"
                     "Let's set up your trading profile now.\n\n"
-                    "💵 অনুগ্রহ করে আপনার ট্রেডিং অ্যাকাউন্ট ব্যালেন্স কত, তা শুধু সংখ্যায় লিখুন (যেমন: `1000`):"
+                    "💵 Please enter your trading account balance as a number only (e.g., `1000`):"
                 )
 
             elif data == "sub":
                 send_telegram_message(
                     telegram_id,
                     f"💎 *Subscription Information*\n\n"
-                    f"সদস্যপদ নিতে বা সাবস্ক্রিপশন কিনতে সরাসরি অনার সাথে যোগাযোগ করুন:\n"
-                    f"👉 কন্টাক্ট: {OWNER_CONTACT}"
+                    f"To purchase a subscription or get VIP access, please contact the owner directly:\n"
+                    f"👉 Contact: {OWNER_CONTACT}"
                 )
 
             return jsonify({"ok": True})
@@ -388,7 +385,7 @@ def telegram_webhook():
             send_telegram_message(
                 telegram_id,
                 "✅ *Welcome to ForexSquad Signal Bot!*\n\n"
-                "দয়া করে নিচের অপشن থেকে আপনার পছন্দ বেছে নিন:",
+                "Please choose an option below to get started:",
                 reply_markup=keyboard
             )
             return jsonify({"ok": True})
@@ -396,7 +393,7 @@ def telegram_webhook():
         # /settings command
         if text == "/settings":
             if not member or member["active"] != 1:
-                send_telegram_message(telegram_id, "⚠️ আপনার কোনো অ্যাক্টিভ প্ল্যান বা ট্রায়াল নেই। শুরু করতে `/start` লিখুন।")
+                send_telegram_message(telegram_id, "⚠️ You don't have an active plan or trial. Type `/start` to begin.")
                 return jsonify({"ok": True})
 
             message_text = (
@@ -421,10 +418,10 @@ def telegram_webhook():
                     conn.execute("UPDATE members SET balance = ?, step = 'ASK_RISK' WHERE telegram_id = ?", (balance, telegram_id))
                     conn.commit()
                     conn.close()
-                    send_telegram_message(telegram_id, "✅ ব্যালেন্স সেভ হয়েছে।\n\n💰 এখন প্রতি ট্রেডে কত ডলার রিস্ক (Risk) নিতে চান? শুধু সংখ্যাটি লিখুন (যেমন: `10`):")
+                    send_telegram_message(telegram_id, "✅ Balance saved.\n\n💰 How much risk (in dollars) do you want to take per trade? Enter a number only (e.g., `10`):")
                 except ValueError:
                     conn.close()
-                    send_telegram_message(telegram_id, "❌ দয়া করে সঠিক সংখ্যা লিখুন (যেমন: `1000`):")
+                    send_telegram_message(telegram_id, "❌ Please enter a valid number (e.g., `1000`):")
 
             elif step == "ASK_RISK":
                 try:
@@ -432,10 +429,10 @@ def telegram_webhook():
                     conn.execute("UPDATE members SET risk_amount = ?, step = 'ASK_RR' WHERE telegram_id = ?", (risk, telegram_id))
                     conn.commit()
                     conn.close()
-                    send_telegram_message(telegram_id, "✅ রিস্ক অ্যামাউন্ট সেভ হয়েছে।\n\n🎯 প্রতিদিনের TP বা Risk/Reward (RR) কত চান? শুধু সংখ্যাটি লিখুন (যেমন: `3` বা `2`):")
+                    send_telegram_message(telegram_id, "✅ Risk amount saved.\n\n🎯 What Risk/Reward (RR) ratio do you want? Enter a number only (e.g., `3` or `2`):")
                 except ValueError:
                     conn.close()
-                    send_telegram_message(telegram_id, "❌ দয়া করে সঠিক সংখ্যা লিখুন:")
+                    send_telegram_message(telegram_id, "❌ Please enter a valid number:")
 
             elif step == "ASK_RR":
                 try:
@@ -443,10 +440,10 @@ def telegram_webhook():
                     conn.execute("UPDATE members SET rr = ?, step = 'ASK_TRADES' WHERE telegram_id = ?", (rr, telegram_id))
                     conn.commit()
                     conn.close()
-                    send_telegram_message(telegram_id, "✅ RR সেভ হয়েছে।\n\n🔢 প্রতিদিন সর্বোচ্চ কয়টি সিগন্যাল (Max Trades) চান? শুধু সংখ্যাটি লিখুন (যেমন: `2`):")
+                    send_telegram_message(telegram_id, "✅ RR saved.\n\n🔢 What is your maximum number of trades per day? Enter a number only (e.g., `2`):")
                 except ValueError:
                     conn.close()
-                    send_telegram_message(telegram_id, "❌ দয়া করে সঠিক সংখ্যা লিখুন:")
+                    send_telegram_message(telegram_id, "❌ Please enter a valid number:")
 
             elif step == "ASK_TRADES":
                 try:
@@ -456,17 +453,17 @@ def telegram_webhook():
                     conn.close()
                     send_telegram_message(
                         telegram_id,
-                        "🎉 *setup Complete!* আপনার সেটিংস সফলভাবে সেভ হয়েছে।\n\n"
-                        "এখন থেকে ট্রেডিংভিউ সিগন্যাল আসলে আপনার পছন্দমতো সেটআপ অনুযায়ী সিগন্যাল পেয়ে যাবেন। সেটিংস দেখতে `/settings` লিখুন।"
+                        "🎉 *Setup Complete!* Your settings have been saved successfully.\n\n"
+                        "You will now receive TradingView signals according to your preferences. Type `/settings` to view them."
                     )
                 except ValueError:
                     conn.close()
-                    send_telegram_message(telegram_id, "❌ দয়া করে সঠিক সংখ্যা লিখুন:")
+                    send_telegram_message(telegram_id, "❌ Please enter a valid number:")
 
             return jsonify({"ok": True})
 
         # Default fallback
-        send_telegram_message(telegram_id, "বট চালু করতে `/start` লিখুন অথবা সেটিংস দেখতে `/settings` লিখুন।")
+        send_telegram_message(telegram_id, "Type `/start` to launch the bot or `/settings` to check your configuration.")
         return jsonify({"ok": True})
 
     except Exception as e:
