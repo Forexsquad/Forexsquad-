@@ -12,7 +12,7 @@ app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8879920230:AAHXPrHiOfEBuXwaFH3L5OCK0yMLq2UgApE")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "YOUR_SECRET_KEY")
-OWNER_CONTACT = "@Almamud09"
+OWNER_CONTACT = "@Almahmud09"
 
 DATABASE = "forexsquad.db"
 
@@ -24,7 +24,6 @@ def get_db():
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def init_db():
     conn = get_db()
@@ -57,6 +56,7 @@ def init_db():
             action TEXT,
             price REAL,
             sl REAL,
+            tp REAL,
             timeframe TEXT,
             created_at TEXT
         )
@@ -65,14 +65,12 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 # ============================================================
 # DAILY RESET & TRIAL CHECK
 # ============================================================
 
 def reset_member_if_new_day(member):
     today = str(date.today())
-
     if member["last_reset_date"] != today:
         conn = get_db()
         conn.execute("""
@@ -85,9 +83,7 @@ def reset_member_if_new_day(member):
         conn.commit()
         conn.close()
         return True
-
     return False
-
 
 def check_trial_status(member):
     if member["trial_end_date"]:
@@ -103,7 +99,6 @@ def check_trial_status(member):
             pass
     return member["active"] == 1
 
-
 # ============================================================
 # TELEGRAM
 # ============================================================
@@ -117,7 +112,6 @@ def telegram_request(method, data):
         print("Telegram error:", e)
         return None
 
-
 def send_telegram_message(chat_id, message, reply_markup=None):
     payload = {
         "chat_id": chat_id,
@@ -126,9 +120,7 @@ def send_telegram_message(chat_id, message, reply_markup=None):
     }
     if reply_markup:
         payload["reply_markup"] = reply_markup
-
     return telegram_request("sendMessage", payload)
-
 
 # ============================================================
 # MEMBER
@@ -143,7 +135,6 @@ def get_member(telegram_id):
     conn.close()
     return member
 
-
 def create_or_reset_member(telegram_id, username):
     conn = get_db()
     conn.execute(
@@ -157,25 +148,9 @@ def create_or_reset_member(telegram_id, username):
     conn.commit()
     conn.close()
 
-
 # ============================================================
-# TP CALCULATION
+# FORMATTING
 # ============================================================
-
-def calculate_tp(action, entry, sl, rr):
-    risk_distance = abs(entry - sl)
-    if risk_distance <= 0:
-        return None
-
-    if action == "BUY":
-        tp = entry + (risk_distance * rr)
-    elif action == "SELL":
-        tp = entry - (risk_distance * rr)
-    else:
-        return None
-
-    return tp
-
 
 def format_price(value):
     try:
@@ -186,7 +161,6 @@ def format_price(value):
     except:
         return str(value)
 
-
 # ============================================================
 # SIGNAL VALIDATION
 # ============================================================
@@ -196,22 +170,23 @@ def validate_signal(data):
     action = data.get("action")
     price = data.get("price")
     sl = data.get("sl")
+    tp = data.get("tp")
 
-    if not symbol or action not in ["BUY", "SELL"] or price is None or sl is None:
-        return False, "Invalid parameters"
+    if not symbol or action not in ["BUY", "SELL"] or price is None or sl is None or tp is None:
+        return False, "Invalid parameters or missing TP"
     try:
         price = float(price)
         sl = float(sl)
+        tp = float(tp)
     except:
-        return False, "Invalid price/SL"
+        return False, "Invalid price/SL/TP format"
 
-    if action == "BUY" and sl >= price:
-        return False, "BUY SL must be below entry"
-    if action == "SELL" and sl <= price:
-        return False, "SELL SL must be above entry"
+    if action == "BUY" and (sl >= price or tp <= price):
+        return False, "Invalid BUY levels (SL must be < Entry and TP must be > Entry)"
+    if action == "SELL" and (sl <= price or tp >= price):
+        return False, "Invalid SELL levels (SL must be > Entry and TP must be < Entry)"
 
     return True, "OK"
-
 
 def signal_already_processed(signal_key):
     conn = get_db()
@@ -219,25 +194,23 @@ def signal_already_processed(signal_key):
     conn.close()
     return signal is not None
 
-
-def save_signal(signal_key, symbol, action, price, sl, timeframe):
+def save_signal(signal_key, symbol, action, price, sl, tp, timeframe):
     conn = get_db()
     try:
         conn.execute(
-            "INSERT INTO signals (signal_key, symbol, action, price, sl, timeframe, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (signal_key, symbol, action, price, sl, timeframe, datetime.utcnow().isoformat())
+            "INSERT INTO signals (signal_key, symbol, action, price, sl, tp, timeframe, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (signal_key, symbol, action, price, sl, tp, timeframe, datetime.utcnow().isoformat())
         )
         conn.commit()
     except sqlite3.IntegrityError:
         pass
     conn.close()
 
-
 # ============================================================
 # PROCESS SIGNAL FOR MEMBER
 # ============================================================
 
-def process_signal_for_member(member, symbol, action, entry, sl, timeframe):
+def process_signal_for_member(member, symbol, action, entry, sl, tp, timeframe):
     telegram_id = member["telegram_id"]
 
     reset_member_if_new_day(member)
@@ -252,11 +225,6 @@ def process_signal_for_member(member, symbol, action, entry, sl, timeframe):
     if member["trades_today"] >= member["max_trades_per_day"]:
         return
 
-    rr = float(member["rr"])
-    tp = calculate_tp(action, entry, sl, rr)
-    if tp is None:
-        return
-
     emoji = "🟢" if action == "BUY" else "🔴"
     message = (
         f"🚨 *ForexSquad SMC SIGNAL* 🚨\n\n"
@@ -266,7 +234,6 @@ def process_signal_for_member(member, symbol, action, entry, sl, timeframe):
         f"📍 *Entry:* `{format_price(entry)}`\n"
         f"🛑 *Stop Loss:* `{format_price(sl)}`\n"
         f"🎯 *Take Profit:* `{format_price(tp)}`\n\n"
-        f"📊 *RR:* `1:{rr:g}`\n"
         f"💰 *Risk:* `${member['risk_amount']:.2f}`\n\n"
         f"⚠️ *Max trades/day:* `{member['max_trades_per_day']}`"
     )
@@ -277,7 +244,6 @@ def process_signal_for_member(member, symbol, action, entry, sl, timeframe):
         conn.execute("UPDATE members SET trades_today = trades_today + 1 WHERE telegram_id = ?", (telegram_id,))
         conn.commit()
         conn.close()
-
 
 # ============================================================
 # TRADINGVIEW WEBHOOK
@@ -291,31 +257,34 @@ def webhook():
             return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
         data = request.get_json(silent=True)
-        if not data or not validate_signal(data)[0]:
-            return jsonify({"status": "error", "message": "Invalid data"}), 400
+        is_valid, err_msg = validate_signal(data)
+        if not data or not is_valid:
+            return jsonify({"status": "error", "message": err_msg}), 400
 
         symbol, action = data.get("symbol"), data.get("action")
-        entry, sl = float(data.get("price")), float(data.get("sl"))
+        entry = float(data.get("price"))
+        sl = float(data.get("sl"))
+        tp = float(data.get("tp"))
         timeframe = data.get("timeframe", "UNKNOWN")
         timestamp = data.get("timestamp", datetime.utcnow().isoformat())
+        
         signal_key = f"{symbol}|{action}|{timeframe}|{entry}|{timestamp}"
 
         if signal_already_processed(signal_key):
             return jsonify({"status": "ignored"}), 200
 
-        save_signal(signal_key, symbol, action, entry, sl, timeframe)
+        save_signal(signal_key, symbol, action, entry, sl, tp, timeframe)
 
         conn = get_db()
         members = conn.execute("SELECT * FROM members WHERE active = 1").fetchall()
         conn.close()
 
         for member in members:
-            process_signal_for_member(member, symbol, action, entry, sl, timeframe)
+            process_signal_for_member(member, symbol, action, entry, sl, tp, timeframe)
 
         return jsonify({"status": "success"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
 
 # ============================================================
 # TELEGRAM WEBHOOK (WIZARD & CALLBACKS)
@@ -328,7 +297,6 @@ def telegram_webhook():
         if not update:
             return jsonify({"ok": True})
 
-        # --- Inline Button Click (Callback Query) ---
         if "callback_query" in update:
             query = update["callback_query"]
             telegram_id = query["from"]["id"]
@@ -336,7 +304,6 @@ def telegram_webhook():
 
             if data == "trial":
                 trial_end = (date.today() + timedelta(days=15)).strftime("%Y-%m-%d")
-
                 conn = get_db()
                 conn.execute(
                     "UPDATE members SET active = 1, trial_end_date = ?, step = 'ASK_BALANCE' WHERE telegram_id = ?",
@@ -362,7 +329,6 @@ def telegram_webhook():
 
             return jsonify({"ok": True})
 
-        # --- Regular Text Messages ---
         message = update.get("message")
         if not message or "chat" not in message:
             return jsonify({"ok": True})
@@ -373,7 +339,6 @@ def telegram_webhook():
 
         member = get_member(telegram_id)
 
-        # /start command
         if text == "/start":
             create_or_reset_member(telegram_id, username)
             keyboard = {
@@ -390,7 +355,6 @@ def telegram_webhook():
             )
             return jsonify({"ok": True})
 
-        # /settings command
         if text == "/settings":
             if not member or member["active"] != 1:
                 send_telegram_message(telegram_id, "⚠️ You don't have an active plan or trial. Type `/start` to begin.")
@@ -400,14 +364,13 @@ def telegram_webhook():
                 "⚙️ *Your Trading Settings*\n\n"
                 f"💵 Balance: `${member['balance']:.2f}`\n"
                 f"💰 Risk: `${member['risk_amount']:.2f}`\n"
-                f"📊 TP / RR: `1:{member['rr']:g}`\n"
+                f"📊 RR: `1:{member['rr']:g}`\n"
                 f"🔢 Max Trades/Day: `{member['max_trades_per_day']}`\n"
                 f"⏳ Trial Ends: `{member['trial_end_date']}`"
             )
             send_telegram_message(telegram_id, message_text)
             return jsonify({"ok": True})
 
-        # --- Wizard Step-by-Step Flow ---
         if member and member["step"] != "NONE":
             step = member["step"]
             conn = get_db()
@@ -429,7 +392,7 @@ def telegram_webhook():
                     conn.execute("UPDATE members SET risk_amount = ?, step = 'ASK_RR' WHERE telegram_id = ?", (risk, telegram_id))
                     conn.commit()
                     conn.close()
-                    send_telegram_message(telegram_id, "✅ Risk amount saved.\n\n🎯 What Risk/Reward (RR) ratio do you want? Enter a number only (e.g., `3` or `2`):")
+                    send_telegram_message(telegram_id, "✅ Risk amount saved.\n\n🎯 What Risk/Reward (RR) ratio reference do you want? Enter a number only (e.g., `3`):")
                 except ValueError:
                     conn.close()
                     send_telegram_message(telegram_id, "❌ Please enter a valid number:")
@@ -462,14 +425,12 @@ def telegram_webhook():
 
             return jsonify({"ok": True})
 
-        # Default fallback
         send_telegram_message(telegram_id, "Type `/start` to launch the bot or `/settings` to check your configuration.")
         return jsonify({"ok": True})
 
     except Exception as e:
         print("Telegram webhook error:", e)
         return jsonify({"ok": True})
-
 
 # ============================================================
 # HEALTH CHECK & START
@@ -478,7 +439,6 @@ def telegram_webhook():
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "online", "bot": "ForexSquad Signal Bot"})
-
 
 if __name__ == "__main__":
     init_db()
