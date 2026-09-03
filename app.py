@@ -1,445 +1,376 @@
 import os
 import sqlite3
+import logging
 import requests
-from datetime import datetime, date, timedelta
 from flask import Flask, request, jsonify
+
+# ============================================================
+# CONFIGURATION & SETUP
+# ============================================================
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ============================================================
-# CONFIG
-# ============================================================
+# Telegram Bot Token provided
+BOT_TOKEN = "8879920230:AAHXPrHiOfEBuXwaFH3L5OCK0yMLq2UgApE"
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8879920230:AAHXPrHiOfEBuXwaFH3L5OCK0yMLq2UgApE")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "YOUR_SECRET_KEY")
-OWNER_CONTACT = "@Almahmud09"
+HOST = "0.0.0.0"
+PORT = 5000
 
-DATABASE = "forexsquad.db"
+# Owner / Admin details
+ADMIN_USERNAME = "@Almahmud09"
+ADMIN_TELEGRAM_ID = 5864700037
+
+DB_FILE = "forexsquad.db"
 
 # ============================================================
-# DATABASE
+# DATABASE FUNCTIONS
 # ============================================================
 
 def get_db():
-    conn = sqlite3.connect(DATABASE)
+    conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     conn = get_db()
-
-    conn.execute("""
+    cursor = conn.cursor()
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS members (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER UNIQUE NOT NULL,
+            telegram_id INTEGER PRIMARY KEY,
+            first_name TEXT,
+            last_name TEXT,
             username TEXT,
-            balance REAL DEFAULT 0.0,
-            risk_amount REAL DEFAULT 5.0,
-            daily_loss_limit REAL DEFAULT 5.0,
-            rr REAL DEFAULT 3.0,
-            max_trades_per_day INTEGER DEFAULT 1,
-            daily_loss REAL DEFAULT 0.0,
-            trades_today INTEGER DEFAULT 0,
-            last_reset_date TEXT,
-            active INTEGER DEFAULT 0,
-            step TEXT DEFAULT 'NONE',
-            trial_end_date TEXT,
-            created_at TEXT
+            plan TEXT DEFAULT 'Free',
+            expiry_date TEXT DEFAULT NULL,
+            is_active INTEGER DEFAULT 1
         )
     """)
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            signal_key TEXT UNIQUE,
-            symbol TEXT,
-            action TEXT,
-            price REAL,
-            sl REAL,
-            tp REAL,
-            timeframe TEXT,
-            created_at TEXT
-        )
-    """)
-
     conn.commit()
     conn.close()
-
-# ============================================================
-# DAILY RESET & TRIAL CHECK
-# ============================================================
-
-def reset_member_if_new_day(member):
-    today = str(date.today())
-    if member["last_reset_date"] != today:
-        conn = get_db()
-        conn.execute("""
-            UPDATE members
-            SET daily_loss = 0,
-                trades_today = 0,
-                last_reset_date = ?
-            WHERE telegram_id = ?
-        """, (today, member["telegram_id"]))
-        conn.commit()
-        conn.close()
-        return True
-    return False
-
-def check_trial_status(member):
-    if member["trial_end_date"]:
-        try:
-            end_date = datetime.strptime(member["trial_end_date"], "%Y-%m-%d").date()
-            if date.today() > end_date:
-                conn = get_db()
-                conn.execute("UPDATE members SET active = 0 WHERE telegram_id = ?", (member["telegram_id"],))
-                conn.commit()
-                conn.close()
-                return False
-        except:
-            pass
-    return member["active"] == 1
-
-# ============================================================
-# TELEGRAM
-# ============================================================
-
-def telegram_request(method, data):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
-    try:
-        response = requests.post(url, json=data, timeout=10)
-        return response.json()
-    except Exception as e:
-        print("Telegram error:", e)
-        return None
-
-def send_telegram_message(chat_id, message, reply_markup=None):
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "Markdown"
-    }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    return telegram_request("sendMessage", payload)
-
-# ============================================================
-# MEMBER
-# ============================================================
 
 def get_member(telegram_id):
     conn = get_db()
-    member = conn.execute(
-        "SELECT * FROM members WHERE telegram_id = ?",
-        (telegram_id,)
-    ).fetchone()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM members WHERE telegram_id = ?", (telegram_id,))
+    row = cursor.fetchone()
     conn.close()
-    return member
+    return row
 
-def create_or_reset_member(telegram_id, username):
+def upsert_member(telegram_id, first_name, last_name, username):
     conn = get_db()
-    conn.execute(
-        """
-        INSERT INTO members (telegram_id, username, last_reset_date, step, created_at)
-        VALUES (?, ?, ?, 'CHOOSE_PLAN', ?)
-        ON CONFLICT(telegram_id) DO UPDATE SET username = ?, step = 'CHOOSE_PLAN'
-        """,
-        (telegram_id, username, str(date.today()), datetime.utcnow().isoformat(), username)
-    )
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO members (telegram_id, first_name, last_name, username, is_active)
+        VALUES (?, ?, ?, ?, 1)
+        ON CONFLICT(telegram_id) DO UPDATE SET
+            first_name = excluded.first_name,
+            last_name = excluded.last_name,
+            username = excluded.username
+    """, (telegram_id, first_name, last_name, username))
     conn.commit()
     conn.close()
 
-# ============================================================
-# FORMATTING
-# ============================================================
-
-def format_price(value):
-    try:
-        if value >= 100:
-            return f"{value:.2f}"
-        else:
-            return f"{value:.5f}"
-    except:
-        return str(value)
-
-# ============================================================
-# SIGNAL VALIDATION
-# ============================================================
-
-def validate_signal(data):
-    symbol = data.get("symbol")
-    action = data.get("action")
-    price = data.get("price")
-    sl = data.get("sl")
-    tp = data.get("tp")
-
-    if not symbol or action not in ["BUY", "SELL"] or price is None or sl is None or tp is None:
-        return False, "Invalid parameters or missing TP"
-    try:
-        price = float(price)
-        sl = float(sl)
-        tp = float(tp)
-    except:
-        return False, "Invalid price/SL/TP format"
-
-    if action == "BUY" and (sl >= price or tp <= price):
-        return False, "Invalid BUY levels (SL must be < Entry and TP must be > Entry)"
-    if action == "SELL" and (sl <= price or tp >= price):
-        return False, "Invalid SELL levels (SL must be > Entry and TP must be < Entry)"
-
-    return True, "OK"
-
-def signal_already_processed(signal_key):
+def activate_member(telegram_id, days, plan="Premium"):
+    from datetime import datetime, timedelta
     conn = get_db()
-    signal = conn.execute("SELECT id FROM signals WHERE signal_key = ?", (signal_key,)).fetchone()
-    conn.close()
-    return signal is not None
+    cursor = conn.cursor()
+    
+    expiry = datetime.utcnow() + timedelta(days=days)
+    expiry_str = expiry.strftime("%Y-%m-%d %H:%M:%S")
 
-def save_signal(signal_key, symbol, action, price, sl, tp, timeframe):
+    cursor.execute("""
+        UPDATE members 
+        SET plan = ?, expiry_date = ?, is_active = 1 
+        WHERE telegram_id = ?
+    """, (plan, expiry_str, telegram_id))
+    
+    if cursor.rowcount == 0:
+        conn.close()
+        return False, "Member not found in database."
+        
+    conn.commit()
+    conn.close()
+    return True, expiry_str
+
+def deactivate_member(telegram_id):
     conn = get_db()
-    try:
-        conn.execute(
-            "INSERT INTO signals (signal_key, symbol, action, price, sl, tp, timeframe, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (signal_key, symbol, action, price, sl, tp, timeframe, datetime.utcnow().isoformat())
-        )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        pass
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE members 
+        SET is_active = 0 
+        WHERE telegram_id = ?
+    """, (telegram_id,))
+    success = cursor.rowcount > 0
+    conn.commit()
     conn.close()
+    return success
+
+def extend_member(telegram_id, days):
+    from datetime import datetime, timedelta
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT expiry_date FROM members WHERE telegram_id = ?", (telegram_id,))
+    row = cursor.fetchone()
+    
+    if not row:
+        conn.close()
+        return False, "Member not found."
+        
+    current_expiry = row["expiry_date"]
+    base_date = datetime.utcnow()
+    
+    if current_expiry:
+        try:
+            parsed_expiry = datetime.strptime(current_expiry, "%Y-%m-%d %H:%M:%S")
+            if parsed_expiry > base_date:
+                base_date = parsed_expiry
+        except ValueError:
+            pass
+            
+    new_expiry = base_date + timedelta(days=days)
+    new_expiry_str = new_expiry.strftime("%Y-%m-%d %H:%M:%S")
+    
+    cursor.execute("""
+        UPDATE members 
+        SET expiry_date = ?, is_active = 1 
+        WHERE telegram_id = ?
+    """, (new_expiry_str, telegram_id))
+    
+    conn.commit()
+    conn.close()
+    return True, new_expiry_str
+
+def is_admin(telegram_id):
+    return telegram_id == ADMIN_TELEGRAM_ID
 
 # ============================================================
-# PROCESS SIGNAL FOR MEMBER
+# TELEGRAM API HELPERS
 # ============================================================
 
-def process_signal_for_member(member, symbol, action, entry, sl, tp, timeframe):
-    telegram_id = member["telegram_id"]
+def telegram_api(method, payload):
+    url = f"{TELEGRAM_API_URL}/{method}"
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        logger.error(f"Telegram API error ({method}): {e}")
+        return None
 
-    reset_member_if_new_day(member)
-    member = get_member(telegram_id)
+def send_message(chat_id, text, reply_markup=None):
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return telegram_api("sendMessage", payload)
 
-    if not member or not check_trial_status(member):
-        return
+def subscription_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "📊 Check Status", "callback_data": "subscription_status"}],
+            [{"text": "💬 Contact Owner", "url": f"https://t.me/{ADMIN_USERNAME.lstrip('@')}"}]
+        ]
+    }
 
-    if member["daily_loss"] >= member["daily_loss_limit"]:
-        return
-
-    if member["trades_today"] >= member["max_trades_per_day"]:
-        return
-
-    emoji = "🟢" if action == "BUY" else "🔴"
-    message = (
-        f"🚨 *ForexSquad SMC SIGNAL* 🚨\n\n"
-        f"{emoji} *{action}*\n\n"
-        f"🔹 *Symbol:* `{symbol}`\n"
-        f"🔹 *Timeframe:* `{timeframe}`\n\n"
-        f"📍 *Entry:* `{format_price(entry)}`\n"
-        f"🛑 *Stop Loss:* `{format_price(sl)}`\n"
-        f"🎯 *Take Profit:* `{format_price(tp)}`\n\n"
-        f"💰 *Risk:* `${member['risk_amount']:.2f}`\n\n"
-        f"⚠️ *Max trades/day:* `{member['max_trades_per_day']}`"
+def subscription_status_text(member):
+    return (
+        f"👤 <b>Account Info:</b>\n"
+        f"ID: <code>{member['telegram_id']}</code>\n"
+        f"Name: {member['first_name']} {member['last_name'] or ''}\n\n"
+        f"📦 <b>Plan:</b> {member['plan']}\n"
+        f"⏳ <b>Expires:</b> {member['expiry_date'] or 'N/A'}\n"
+        f"🟢 <b>Status:</b> {'Active' if member['is_active'] else 'Inactive'}\n\n"
+        f"👑 <b>Owner / Admin:</b> {ADMIN_USERNAME}"
     )
 
-    result = send_telegram_message(telegram_id, message)
-    if result and result.get("ok"):
-        conn = get_db()
-        conn.execute("UPDATE members SET trades_today = trades_today + 1 WHERE telegram_id = ?", (telegram_id,))
-        conn.commit()
-        conn.close()
-
 # ============================================================
-# TRADINGVIEW WEBHOOK
+# COMMAND HANDLERS
 # ============================================================
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    try:
-        secret = request.args.get("secret")
-        if secret != WEBHOOK_SECRET:
-            return jsonify({"status": "error", "message": "Unauthorized"}), 401
+def handle_start(message):
+    user = message.get("from", {})
+    telegram_id = int(user.get("id", 0))
+    first_name = user.get("first_name", "")
+    last_name = user.get("last_name", "")
+    username = user.get("username", "")
 
-        data = request.get_json(silent=True)
-        is_valid, err_msg = validate_signal(data)
-        if not data or not is_valid:
-            return jsonify({"status": "error", "message": err_msg}), 400
+    upsert_member(telegram_id, first_name, last_name, username)
 
-        symbol, action = data.get("symbol"), data.get("action")
-        entry = float(data.get("price"))
-        sl = float(data.get("sl"))
-        tp = float(data.get("tp"))
-        timeframe = data.get("timeframe", "UNKNOWN")
-        timestamp = data.get("timestamp", datetime.utcnow().isoformat())
+    welcome_text = (
+        f"Welcome to <b>ForexSquad Bot</b>, {first_name}!\n\n"
+        "🧠 <b>Explanations and answers</b>\n"
+        "Free AI → DeepSeek & ChatGPT\n\n"
+        "🖼 <b>Visualize your ideas</b>\n"
+        "Make Image → NanoBanana\n\n"
+        f"For any support or upgrades, contact the owner: {ADMIN_USERNAME}"
+    )
+    send_message(telegram_id, welcome_text, subscription_keyboard())
+
+def handle_status(message):
+    user = message.get("from", {})
+    telegram_id = int(user.get("id", 0))
+    
+    member = get_member(telegram_id)
+    if not member:
+        send_message(telegram_id, "Please use /start to register first.")
+        return
         
-        signal_key = f"{symbol}|{action}|{timeframe}|{entry}|{timestamp}"
+    text = subscription_status_text(member)
+    send_message(telegram_id, text, subscription_keyboard())
 
-        if signal_already_processed(signal_key):
-            return jsonify({"status": "ignored"}), 200
+def handle_admin_activate(telegram_id, args):
+    if not is_admin(telegram_id):
+        return
 
-        save_signal(signal_key, symbol, action, entry, sl, tp, timeframe)
+    if len(args) < 2:
+        send_message(telegram_id, "Usage:\n/activate <telegram_id> <days> [plan]")
+        return
 
-        conn = get_db()
-        members = conn.execute("SELECT * FROM members WHERE active = 1").fetchall()
-        conn.close()
-
-        for member in members:
-            process_signal_for_member(member, symbol, action, entry, sl, tp, timeframe)
-
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-# ============================================================
-# TELEGRAM WEBHOOK (WIZARD & CALLBACKS)
-# ============================================================
-
-@app.route("/telegram", methods=["POST"])
-def telegram_webhook():
     try:
-        update = request.get_json(silent=True)
-        if not update:
-            return jsonify({"ok": True})
+        target_id = int(args[0])
+        days = int(args[1])
+        plan = args[2] if len(args) > 2 else "Premium"
+        if days <= 0:
+            raise ValueError
+    except ValueError:
+        send_message(telegram_id, "Invalid parameters.")
+        return
 
-        if "callback_query" in update:
-            query = update["callback_query"]
-            telegram_id = query["from"]["id"]
-            data = query["data"]
+    success, result = activate_member(target_id, days, plan)
 
-            if data == "trial":
-                trial_end = (date.today() + timedelta(days=15)).strftime("%Y-%m-%d")
-                conn = get_db()
-                conn.execute(
-                    "UPDATE members SET active = 1, trial_end_date = ?, step = 'ASK_BALANCE' WHERE telegram_id = ?",
-                    (trial_end, telegram_id)
-                )
-                conn.commit()
-                conn.close()
+    if not success:
+        send_message(telegram_id, f"Failed to activate member: {result}")
+    else:
+        send_message(
+            telegram_id,
+            f"Successfully activated member <code>{target_id}</code> for {days} day(s).\nPlan: {plan}\nExpires: {result}"
+        )
+        send_message(
+            target_id,
+            f"🎉 <b>Your subscription has been activated!</b>\nPlan: <b>{plan}</b>\nValid for: <b>{days} day(s)</b>",
+            subscription_keyboard()
+        )
 
-                send_telegram_message(
-                    telegram_id,
-                    "🎉 *15 Days Free Trial Activated!*\n\n"
-                    "Let's set up your trading profile now.\n\n"
-                    "💵 Please enter your trading account balance as a number only (e.g., `1000`):"
-                )
+def handle_admin_deactivate(telegram_id, args):
+    if not is_admin(telegram_id):
+        return
 
-            elif data == "sub":
-                send_telegram_message(
-                    telegram_id,
-                    f"💎 *Subscription Information*\n\n"
-                    f"To purchase a subscription or get VIP access, please contact the owner directly:\n"
-                    f"👉 Contact: {OWNER_CONTACT}"
-                )
+    if len(args) < 1:
+        send_message(telegram_id, "Usage:\n/deactivate <telegram_id>")
+        return
 
-            return jsonify({"ok": True})
+    try:
+        target_id = int(args[0])
+    except ValueError:
+        send_message(telegram_id, "Invalid telegram ID.")
+        return
 
-        message = update.get("message")
-        if not message or "chat" not in message:
-            return jsonify({"ok": True})
+    success = deactivate_member(target_id)
 
-        telegram_id = message["chat"]["id"]
-        username = message["chat"].get("username", "")
-        text = (message.get("text") or "").strip()
+    if success:
+        send_message(telegram_id, f"Member <code>{target_id}</code> has been deactivated.")
+        send_message(target_id, "⚠️ Your subscription has been deactivated by an administrator.")
+    else:
+        send_message(telegram_id, f"Failed to deactivate member <code>{target_id}</code> (not found or error).")
 
-        member = get_member(telegram_id)
+def handle_admin_extend(telegram_id, args):
+    if not is_admin(telegram_id):
+        return
 
-        if text == "/start":
-            create_or_reset_member(telegram_id, username)
-            keyboard = {
-                "inline_keyboard": [
-                    [{"text": "🚀 15 Days Free Trial", "callback_data": "trial"}],
-                    [{"text": "💎 Subscription / VIP", "callback_data": "sub"}]
-                ]
-            }
-            send_telegram_message(
-                telegram_id,
-                "✅ *Welcome to ForexSquad Signal Bot!*\n\n"
-                "Please choose an option below to get started:",
-                reply_markup=keyboard
-            )
-            return jsonify({"ok": True})
+    if len(args) < 2:
+        send_message(telegram_id, "Usage:\n/extend <telegram_id> <days>")
+        return
 
-        if text == "/settings":
-            if not member or member["active"] != 1:
-                send_telegram_message(telegram_id, "⚠️ You don't have an active plan or trial. Type `/start` to begin.")
-                return jsonify({"ok": True})
+    try:
+        target_id = int(args[0])
+        days = int(args[1])
+        if days <= 0:
+            raise ValueError
+    except ValueError:
+        send_message(telegram_id, "Invalid parameters.")
+        return
 
-            message_text = (
-                "⚙️ *Your Trading Settings*\n\n"
-                f"💵 Balance: `${member['balance']:.2f}`\n"
-                f"💰 Risk: `${member['risk_amount']:.2f}`\n"
-                f"📊 RR: `1:{member['rr']:g}`\n"
-                f"🔢 Max Trades/Day: `{member['max_trades_per_day']}`\n"
-                f"⏳ Trial Ends: `{member['trial_end_date']}`"
-            )
-            send_telegram_message(telegram_id, message_text)
-            return jsonify({"ok": True})
+    success, result = extend_member(target_id, days)
 
-        if member and member["step"] != "NONE":
-            step = member["step"]
-            conn = get_db()
-
-            if step == "ASK_BALANCE":
-                try:
-                    balance = float(text)
-                    conn.execute("UPDATE members SET balance = ?, step = 'ASK_RISK' WHERE telegram_id = ?", (balance, telegram_id))
-                    conn.commit()
-                    conn.close()
-                    send_telegram_message(telegram_id, "✅ Balance saved.\n\n💰 How much risk (in dollars) do you want to take per trade? Enter a number only (e.g., `10`):")
-                except ValueError:
-                    conn.close()
-                    send_telegram_message(telegram_id, "❌ Please enter a valid number (e.g., `1000`):")
-
-            elif step == "ASK_RISK":
-                try:
-                    risk = float(text)
-                    conn.execute("UPDATE members SET risk_amount = ?, step = 'ASK_RR' WHERE telegram_id = ?", (risk, telegram_id))
-                    conn.commit()
-                    conn.close()
-                    send_telegram_message(telegram_id, "✅ Risk amount saved.\n\n🎯 What Risk/Reward (RR) ratio reference do you want? Enter a number only (e.g., `3`):")
-                except ValueError:
-                    conn.close()
-                    send_telegram_message(telegram_id, "❌ Please enter a valid number:")
-
-            elif step == "ASK_RR":
-                try:
-                    rr = float(text)
-                    conn.execute("UPDATE members SET rr = ?, step = 'ASK_TRADES' WHERE telegram_id = ?", (rr, telegram_id))
-                    conn.commit()
-                    conn.close()
-                    send_telegram_message(telegram_id, "✅ RR saved.\n\n🔢 What is your maximum number of trades per day? Enter a number only (e.g., `2`):")
-                except ValueError:
-                    conn.close()
-                    send_telegram_message(telegram_id, "❌ Please enter a valid number:")
-
-            elif step == "ASK_TRADES":
-                try:
-                    trades = int(text)
-                    conn.execute("UPDATE members SET max_trades_per_day = ?, step = 'NONE' WHERE telegram_id = ?", (trades, telegram_id))
-                    conn.commit()
-                    conn.close()
-                    send_telegram_message(
-                        telegram_id,
-                        "🎉 *Setup Complete!* Your settings have been saved successfully.\n\n"
-                        "You will now receive TradingView signals according to your preferences. Type `/settings` to view them."
-                    )
-                except ValueError:
-                    conn.close()
-                    send_telegram_message(telegram_id, "❌ Please enter a valid number:")
-
-            return jsonify({"ok": True})
-
-        send_telegram_message(telegram_id, "Type `/start` to launch the bot or `/settings` to check your configuration.")
-        return jsonify({"ok": True})
-
-    except Exception as e:
-        print("Telegram webhook error:", e)
-        return jsonify({"ok": True})
+    if not success:
+        send_message(telegram_id, f"Failed to extend subscription: {result}")
+    else:
+        send_message(telegram_id, f"Successfully extended member <code>{target_id}</code> by {days} day(s).\nNew Expiry: {result}")
+        send_message(
+            target_id,
+            f"⏱️ <b>Your subscription has been extended by {days} day(s)!</b>\nNew Expiry: <b>{result}</b>",
+            subscription_keyboard()
+        )
 
 # ============================================================
-# HEALTH CHECK & START
+# TELEGRAM WEBHOOK / UPDATE DISPATCHER
 # ============================================================
 
-@app.route("/", methods=["GET"])
-def home():
-    return jsonify({"status": "online", "bot": "ForexSquad Signal Bot"})
+@app.route("/webhook/telegram", methods=["POST"])
+def telegram_webhook():
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({"ok": True}), 200
+
+    if "callback_query" in data:
+        cq = data["callback_query"]
+        user = cq.get("from", {})
+        telegram_id = int(user.get("id", 0))
+        data_str = cq.get("data", "")
+
+        if data_str == "subscription_status":
+            member = get_member(telegram_id)
+            if member:
+                text = subscription_status_text(member)
+                telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id")})
+                send_message(telegram_id, text, subscription_keyboard())
+            else:
+                telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": "Please use /start first."})
+
+        return jsonify({"ok": True}), 200
+
+    message = data.get("message") or data.get("edited_message")
+    if not message:
+        return jsonify({"ok": True}), 200
+
+    text = message.get("text", "").strip()
+    user = message.get("from", {})
+    telegram_id = int(user.get("id", 0))
+
+    if not telegram_id or not text:
+        return jsonify({"ok": True}), 200
+
+    if text.startswith("/"):
+        parts = text.split()
+        command = parts[0].split("@")[0].lower()
+        args = parts[1:]
+
+        if command == "/start":
+            handle_start(message)
+        elif command == "/status":
+            handle_status(message)
+        elif command == "/activate":
+            handle_admin_activate(telegram_id, args)
+        elif command == "/deactivate":
+            handle_admin_deactivate(telegram_id, args)
+        elif command == "/extend":
+            handle_admin_extend(telegram_id, args)
+
+    return jsonify({"ok": True}), 200
+
+# ============================================================
+# APP INITIALIZATION
+# ============================================================
 
 if __name__ == "__main__":
     init_db()
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    logger.info("ForexSquad Bot backend starting on %s:%s", HOST, PORT)
+    app.run(host=HOST, port=PORT)
