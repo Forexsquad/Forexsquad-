@@ -75,7 +75,6 @@ def init_db():
     conn = get_db()
     cursor = conn.cursor()
 
-    # Base table creation
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS members (
             telegram_id INTEGER PRIMARY KEY,
@@ -88,14 +87,13 @@ def init_db():
         )
     """)
 
-    # Safe migration: Add settings columns if they don't exist yet
     cursor.execute("PRAGMA table_info(members)")
     existing_columns = [col["name"] for col in cursor.fetchall()]
 
     new_columns = {
-        "account_balance": "REAL DEFAULT 0.0",
-        "daily_max_loss": "REAL DEFAULT 0.0",
-        "daily_profit_target": "REAL DEFAULT 0.0",
+        "account_balance": "TEXT DEFAULT '0.0'",
+        "daily_max_loss": "TEXT DEFAULT '0.0'",
+        "daily_profit_target": "TEXT DEFAULT '0.0'",
         "broker": "TEXT DEFAULT 'N/A'",
         "platform": "TEXT DEFAULT 'N/A'",
         "onboarding_step": "TEXT DEFAULT NULL"
@@ -143,7 +141,7 @@ def update_member_setting(telegram_id, field, value):
     conn = get_db()
     cursor = conn.cursor()
     query = f"UPDATE members SET {field} = ? WHERE telegram_id = ?"
-    cursor.execute(query, (value, telegram_id))
+    cursor.execute(query, (str(value), telegram_id))
     conn.commit()
     conn.close()
 
@@ -284,11 +282,11 @@ def subscription_status_text(member):
     first_name = member["first_name"] or ""
     last_name = member["last_name"] or ""
     
-    balance = member["account_balance"] if "account_balance" in member and member["account_balance"] is not None else 0.0
-    max_loss = member["daily_max_loss"] if "daily_max_loss" in member and member["daily_max_loss"] is not None else 0.0
-    target = member["daily_profit_target"] if "daily_profit_target" in member and member["daily_profit_target"] is not None else 0.0
-    broker = member["broker"] if "broker" in member and member["broker"] else "N/A"
-    platform = member["platform"] if "platform" in member and member["platform"] else "N/A"
+    balance = member["account_balance"] if member["account_balance"] else "0.0"
+    max_loss = member["daily_max_loss"] if member["daily_max_loss"] else "0.0"
+    target = member["daily_profit_target"] if member["daily_profit_target"] else "0.0"
+    broker = member["broker"] if member["broker"] else "N/A"
+    platform = member["platform"] if member["platform"] else "N/A"
 
     return (
         "👤 <b>Account Info:</b>\n"
@@ -326,31 +324,19 @@ def handle_onboarding_step(telegram_id, text, member):
     step = member["onboarding_step"]
 
     if step == "WAITING_BALANCE":
-        try:
-            val = float(text)
-            update_member_setting(telegram_id, "account_balance", val)
-            update_member_setting(telegram_id, "onboarding_step", "WAITING_MAX_LOSS")
-            send_message(telegram_id, "🛑 Enter your <b>Daily Maximum Loss</b> limit (e.g., 50):")
-        except ValueError:
-            send_message(telegram_id, "❌ Please enter a valid number for Account Balance.")
+        update_member_setting(telegram_id, "account_balance", text.strip())
+        update_member_setting(telegram_id, "onboarding_step", "WAITING_MAX_LOSS")
+        send_message(telegram_id, "🛑 Enter your <b>Daily Maximum Loss</b> limit (e.g., 50):")
 
     elif step == "WAITING_MAX_LOSS":
-        try:
-            val = float(text)
-            update_member_setting(telegram_id, "daily_max_loss", val)
-            update_member_setting(telegram_id, "onboarding_step", "WAITING_TARGET")
-            send_message(telegram_id, "🎯 Enter your <b>Daily Profit Target</b> (e.g., 100):")
-        except ValueError:
-            send_message(telegram_id, "❌ Please enter a valid number for Daily Max Loss.")
+        update_member_setting(telegram_id, "daily_max_loss", text.strip())
+        update_member_setting(telegram_id, "onboarding_step", "WAITING_TARGET")
+        send_message(telegram_id, "🎯 Enter your <b>Daily Profit Target</b> (e.g., 100):")
 
     elif step == "WAITING_TARGET":
-        try:
-            val = float(text)
-            update_member_setting(telegram_id, "daily_profit_target", val)
-            update_member_setting(telegram_id, "onboarding_step", "WAITING_BROKER")
-            send_message(telegram_id, "🏦 Enter your <b>Broker name</b> (e.g., Exness, ICMarkets):")
-        except ValueError:
-            send_message(telegram_id, "❌ Please enter a valid number for Profit Target.")
+        update_member_setting(telegram_id, "daily_profit_target", text.strip())
+        update_member_setting(telegram_id, "onboarding_step", "WAITING_BROKER")
+        send_message(telegram_id, "🏦 Enter your <b>Broker name</b> (e.g., Exness, ICMarkets):")
 
     elif step == "WAITING_BROKER":
         update_member_setting(telegram_id, "broker", text.strip())
@@ -359,7 +345,7 @@ def handle_onboarding_step(telegram_id, text, member):
 
     elif step == "WAITING_PLATFORM":
         update_member_setting(telegram_id, "platform", text.strip())
-        update_member_setting(telegram_id, "onboarding_step", None) # Clear setup
+        update_member_setting(telegram_id, "onboarding_step", None)
         
         updated_member = get_member(telegram_id)
         send_message(
@@ -413,7 +399,6 @@ def handle_cancel(message):
         return
 
     member = get_member(telegram_id)
-    # Fixed: Replaced member.get() with standard row index check to avoid AttributeError
     if member and member["onboarding_step"]:
         update_member_setting(telegram_id, "onboarding_step", None)
         send_message(telegram_id, "❌ Setup/Settings update cancelled.", subscription_keyboard())
@@ -555,7 +540,6 @@ def telegram_webhook():
 
     member = get_member(telegram_id)
 
-    # Fixed: Replaced member.get() with standard row index check to avoid AttributeError
     if member and member["onboarding_step"] and not text.startswith("/"):
         handle_onboarding_step(telegram_id, text, member)
         return jsonify({"ok": True}), 200
@@ -607,8 +591,6 @@ def tradingview_alm04_webhook():
 
     logger.info("TradingView signal received: %s", signal_text)
 
-    # Note: As mentioned, this currently sends only to Admin. 
-    # Member-specific risk distribution logic can be added in the next phase!
     send_message(
         ADMIN_TELEGRAM_ID,
         f"🚨 <b>TradingView Signal (Alm04):</b>\n\n{signal_text}"
