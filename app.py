@@ -573,7 +573,7 @@ def telegram_webhook():
 
 
 # ============================================================
-# TRADINGVIEW WEBHOOK FOR ALM04
+# TRADINGVIEW WEBHOOK FOR ALM04 (WITH BROADCAST)
 # ============================================================
 
 @app.route("/webhook/alm04", methods=["POST"])
@@ -591,10 +591,29 @@ def tradingview_alm04_webhook():
 
     logger.info("TradingView signal received: %s", signal_text)
 
+    # 1. Send to Admin first
     send_message(
         ADMIN_TELEGRAM_ID,
         f"🚨 <b>TradingView Signal (Alm04):</b>\n\n{signal_text}"
     )
+
+    # 2. Broadcast to all active members
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT telegram_id FROM members WHERE is_active = 1")
+    active_members = cursor.fetchall()
+    conn.close()
+
+    broadcast_text = f"🚨 <b>VIP Forex Signal:</b>\n\n{signal_text}"
+
+    for member in active_members:
+        member_id = member["telegram_id"]
+        if member_id == ADMIN_TELEGRAM_ID:
+            continue  # Skip admin to avoid duplicate notification if already sent above
+        try:
+            send_message(member_id, broadcast_text)
+        except Exception as e:
+            logger.error(f"Failed to send signal to {member_id}: {e}")
 
     return jsonify({"ok": True}), 200
 
