@@ -858,7 +858,7 @@ def telegram_webhook():
 
 
 # ============================================================
-# TRADINGVIEW WEBHOOK FOR ALM04
+# TRADINGVIEW WEBHOOK FOR ALM04 (Secret updated to Hemal@09)
 # ============================================================
 
 @app.route(
@@ -867,7 +867,7 @@ def telegram_webhook():
 )
 def tradingview_alm04_webhook():
     secret = request.args.get("secret")
-    if secret != "Hemal@":
+    if secret != "Hemal@09":
         return jsonify({"error": "Unauthorized"}), 403
 
     data = request.get_json(silent=True)
