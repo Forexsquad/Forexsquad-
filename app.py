@@ -33,7 +33,6 @@ app = Flask(__name__)
 HOST = "0.0.0.0"
 PORT = int(os.getenv("PORT", "5000"))
 
-# Render-এর Environment Variable থেকে টোকেন পড়ার জন্য এটি আপডেট করা হলো
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
 TELEGRAM_API_URL = (
@@ -705,10 +704,6 @@ def telegram_webhook():
         "Telegram update received."
     )
 
-    # --------------------------------------------------------
-    # CALLBACK QUERY
-    # --------------------------------------------------------
-
     if "callback_query" in data:
 
         callback = data["callback_query"]
@@ -773,10 +768,6 @@ def telegram_webhook():
             "ok": True
         }), 200
 
-    # --------------------------------------------------------
-    # MESSAGE
-    # --------------------------------------------------------
-
     message = (
         data.get("message")
         or data.get("edited_message")
@@ -810,10 +801,6 @@ def telegram_webhook():
         return jsonify({
             "ok": True
         }), 200
-
-    # --------------------------------------------------------
-    # COMMANDS
-    # --------------------------------------------------------
 
     if text.startswith("/"):
 
@@ -864,6 +851,39 @@ def telegram_webhook():
                 telegram_id,
                 args
             )
+
+    return jsonify({
+        "ok": True
+    }), 200
+
+
+# ============================================================
+# TRADINGVIEW WEBHOOK FOR ALM04
+# ============================================================
+
+@app.route(
+    "/webhook/alm04",
+    methods=["POST"]
+)
+def tradingview_alm04_webhook():
+    secret = request.args.get("secret")
+    if secret != "Hemal@":
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data = request.get_json(silent=True)
+    
+    if not data:
+        raw_text = request.get_data(as_text=True)
+        signal_text = raw_text if raw_text else "TradingView Signal Triggered!"
+    else:
+        signal_text = data.get("text") or str(data)
+
+    logger.info("TradingView signal received: %s", signal_text)
+
+    send_message(
+        ADMIN_TELEGRAM_ID,
+        f"🚨 <b>TradingView Signal (Alm04):</b>\n\n{signal_text}"
+    )
 
     return jsonify({
         "ok": True
